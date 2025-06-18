@@ -4,19 +4,36 @@ Script to directly check the PostgreSQL database for data
 """
 
 import psycopg2
+import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 def check_database():
     """Connect to PostgreSQL and check for data"""
     
     try:
+        # Get database connection details from environment variables
+        db_host = os.getenv('DB_HOST', 'localhost')
+        db_port = os.getenv('DB_PORT', '5432')
+        db_name = os.getenv('DB_NAME', 'energy_pipeline')
+        db_user = os.getenv('DB_USER', 'postgres')
+        db_password = os.getenv('DB_PASSWORD')
+        
+        if not db_password:
+            print("❌ ERROR: DB_PASSWORD not found in environment variables!")
+            print("Please set DB_PASSWORD in your .env file")
+            return
+        
         # Connect to database
         conn = psycopg2.connect(
-            host="localhost",
-            port="5432", 
-            database="energy_pipeline",
-            user="postgres",
-            password="password123"
+            host=db_host,
+            port=db_port, 
+            database=db_name,
+            user=db_user,
+            password=db_password
         )
         
         cursor = conn.cursor()

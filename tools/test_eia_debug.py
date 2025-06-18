@@ -7,10 +7,20 @@ Run this to see what's happening with the EIA API calls
 import requests
 import sys
 import json
+import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-# Your API key from .env
-EIA_API_KEY = "nhu2rJPUQe7bAvNvGhdAjWXXC0d91csyEkh5kSC3"
+# Load environment variables
+load_dotenv()
+
+# Get API key from environment variable
+EIA_API_KEY = os.getenv('EIA_API_KEY')
+
+if not EIA_API_KEY:
+    print("❌ ERROR: EIA_API_KEY not found in environment variables!")
+    print("Please set EIA_API_KEY in your .env file")
+    sys.exit(1)
 
 def test_eia_api():
     """Test EIA API with different approaches"""
