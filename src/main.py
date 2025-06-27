@@ -1,10 +1,11 @@
-# src/main.py - Complete API with Data Ingestion
-from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException
+# src/main.py - Complete API with Data Ingestion and WebSocket Streaming
+from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from datetime import datetime, timedelta
 import logging
+import asyncio
 
 from src.core.config import settings
 from src.database.connection import get_db, db_manager
@@ -16,6 +17,14 @@ from src.services.data_processor import DataProcessor
 from src.services.data_quality_service import DataQualityService
 from src.services.quality_monitor import quality_monitor
 from src.schemas.quality import ComprehensiveQualityResponse
+from src.services.websocket_manager import (
+    connection_manager, 
+    broadcast_energy_data,
+    broadcast_weather_data,
+    broadcast_quality_update,
+    broadcast_pipeline_status,
+    broadcast_system_health
+)
 
 # Configure logging
 logging.basicConfig(level=settings.log_level)
@@ -34,11 +43,14 @@ app.add_middleware(
         "http://localhost:3000", 
         "http://127.0.0.1:3000",
         "http://localhost:3001", 
-        "http://127.0.0.1:3001"
-    ],  # Frontend origins
+        "http://127.0.0.1:3001",
+        "ws://localhost:3000",
+        "ws://127.0.0.1:3000"
+    ],  # Frontend origins including WebSocket
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # Initialize services
@@ -49,7 +61,7 @@ quality_service = DataQualityService()
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database tables and start background services on startup"""
+    """Initialize database tables and start background services including WebSocket health monitoring"""
     try:
         db_manager.create_tables()
         logger.info("✅ Database tables created successfully")
@@ -58,17 +70,61 @@ async def startup_event():
         await quality_monitor.start_monitoring()
         logger.info("✅ Quality monitoring started")
         
+        # Start periodic health broadcasting
+        async def broadcast_health_periodically():
+            while True:
+                try:
+                    # Get system health data
+                    health_data = {
+                        "database_status": "connected",
+                        "active_connections": connection_manager.get_connection_stats()["total_connections"],
+                        "quality_monitoring": "active",
+                        "timestamp": datetime.now().isoformat(),
+                        "uptime_seconds": (datetime.now() - startup_time).total_seconds() if 'startup_time' in globals() else 0
+                    }
+                    
+                    await broadcast_system_health(health_data)
+                    await asyncio.sleep(60)  # Broadcast health every minute
+                    
+                except Exception as e:
+                    logger.error(f"Health broadcast error: {str(e)}")
+                    await asyncio.sleep(60)
+        
+        # Start health broadcasting task
+        asyncio.create_task(broadcast_health_periodically())
+        
+        # Track startup time
+        global startup_time
+        startup_time = datetime.now()
+        
+        logger.info("✅ WebSocket health monitoring started")
+        
     except Exception as e:
         logger.error(f"❌ Startup failed: {str(e)}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean shutdown of background services"""
+    """Clean shutdown of background services including WebSocket connections"""
     try:
         await quality_monitor.stop_monitoring()
+        logger.info("✅ Quality monitoring stopped")
+        
+        # Broadcast shutdown notification
+        try:
+            await broadcast_system_health({
+                "status": "shutting_down",
+                "message": "Server is shutting down",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception:
+            pass  # Don't fail shutdown if broadcast fails
+        
         logger.info("✅ Background services stopped")
     except Exception as e:
         logger.error(f"❌ Shutdown error: {str(e)}")
+
+# Track startup time
+startup_time = datetime.now()
 
 @app.get("/")
 async def root():
@@ -76,6 +132,7 @@ async def root():
         "message": "Energy Pipeline API",
         "status": "operational",
         "version": "1.0.0",
+        "features": ["Real-time WebSocket Streaming", "Data Quality Monitoring", "Automated Pipelines"],
         "endpoints": {
             "health": "/health",
             "energy_data": "/api/v1/energy/consumption",
@@ -83,8 +140,96 @@ async def root():
             "weather_data": "/api/v1/weather/current",
             "run_energy_pipeline": "/api/v1/pipeline/run-energy-ingestion",
             "run_weather_pipeline": "/api/v1/pipeline/run-weather-ingestion",
+            "websocket_all": "/ws",
+            "websocket_energy": "/ws/energy",
+            "websocket_weather": "/ws/weather",
+            "websocket_quality": "/ws/quality",
+            "websocket_pipeline": "/ws/pipeline",
+            "websocket_stats": "/api/v1/websocket/stats",
             "api_docs": "/docs"
         }
+    }
+
+# WebSocket Endpoints
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Main WebSocket endpoint - subscribes to all channels"""
+    await connection_manager.connect(websocket, ["all"])
+    try:
+        while True:
+            # Keep connection alive and handle incoming messages
+            data = await websocket.receive_text()
+            logger.debug(f"Received WebSocket message: {data}")
+            
+            # You can add client-to-server message handling here if needed
+            # For now, we just keep the connection alive
+            
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {str(e)}")
+        await connection_manager.disconnect(websocket)
+
+@app.websocket("/ws/energy")
+async def websocket_energy_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for energy data only"""
+    await connection_manager.connect(websocket, ["energy"])
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Energy WebSocket error: {str(e)}")
+        await connection_manager.disconnect(websocket)
+
+@app.websocket("/ws/weather")
+async def websocket_weather_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for weather data only"""
+    await connection_manager.connect(websocket, ["weather"])
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Weather WebSocket error: {str(e)}")
+        await connection_manager.disconnect(websocket)
+
+@app.websocket("/ws/quality")
+async def websocket_quality_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for data quality updates only"""
+    await connection_manager.connect(websocket, ["quality"])
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Quality WebSocket error: {str(e)}")
+        await connection_manager.disconnect(websocket)
+
+@app.websocket("/ws/pipeline")
+async def websocket_pipeline_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for pipeline status updates only"""
+    await connection_manager.connect(websocket, ["pipeline"])
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Pipeline WebSocket error: {str(e)}")
+        await connection_manager.disconnect(websocket)
+
+@app.get("/api/v1/websocket/stats")
+async def get_websocket_stats():
+    """Get WebSocket connection statistics"""
+    stats = connection_manager.get_connection_stats()
+    return {
+        "status": "success",
+        "websocket_stats": stats,
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/health")
@@ -94,21 +239,39 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         result = await db.execute(text("SELECT 1"))
         result.scalar()
         
-        return {
+        # Get WebSocket stats
+        ws_stats = connection_manager.get_connection_stats()
+        
+        health_data = {
             "status": "healthy",
             "database": "connected",
             "timestamp": datetime.now().isoformat(),
             "api_keys": {
                 "eia_configured": bool(settings.eia_api_key and settings.eia_api_key != "dummy_key"),
                 "weather_configured": bool(settings.openweather_api_key and settings.openweather_api_key != "dummy_key")
+            },
+            "websocket": {
+                "active_connections": ws_stats["total_connections"],
+                "channel_subscriptions": ws_stats["channel_subscriptions"],
+                "heartbeat_active": ws_stats["heartbeat_active"]
             }
         }
+        
+        # Broadcast health update
+        await broadcast_system_health(health_data)
+        
+        return health_data
+        
     except Exception as e:
-        return {
+        error_data = {
             "status": "unhealthy", 
             "database": "disconnected",
-            "error": str(e)
+            "error": str(e),
+            "websocket": connection_manager.get_connection_stats()
         }
+        
+        await broadcast_system_health(error_data)
+        return error_data
 
 @app.get("/api/v1/energy/consumption")
 async def get_energy_consumption(
@@ -121,6 +284,12 @@ async def get_energy_consumption(
 ):
     """Get energy consumption data with optional filters"""
     try:
+        # Convert timezone-aware datetimes to timezone-naive for database compatibility
+        if start_date and start_date.tzinfo is not None:
+            start_date = start_date.replace(tzinfo=None)
+        if end_date and end_date.tzinfo is not None:
+            end_date = end_date.replace(tzinfo=None)
+            
         records = await EnergyRepository.get_energy_consumption(
             db=db,
             region=region,
@@ -211,7 +380,7 @@ async def run_energy_ingestion(
     days_back: int = Query(7, ge=1, le=30, description="Days of data to fetch"),
     db: AsyncSession = Depends(get_db)
 ):
-    """Trigger energy data ingestion pipeline"""
+    """Trigger energy data ingestion pipeline with real-time WebSocket updates"""
     
     # Check if API key is configured
     if not settings.eia_api_key or settings.eia_api_key == "dummy_key":
@@ -220,18 +389,33 @@ async def run_energy_ingestion(
             detail="EIA API key not configured. Please set EIA_API_KEY in your .env file"
         )
     
-    async def run_pipeline():
+    async def run_pipeline_with_updates():
         start_time = datetime.now()
         pipeline_name = "energy_ingestion"
         
         try:
+            # Broadcast pipeline start
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "started",
+                "regions": regions,
+                "start_time": start_time.isoformat(),
+                "message": f"Starting energy ingestion for regions: {', '.join(regions)}"
+            })
+            
             logger.info(f"🚀 Starting energy ingestion pipeline for regions: {regions}")
             
             # Calculate date range
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
             
-            logger.info(f"📅 Fetching data from {start_date.date()} to {end_date.date()}")
+            # Broadcast progress
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "fetching",
+                "message": f"Fetching data from {start_date.date()} to {end_date.date()}",
+                "progress": 10
+            })
             
             # Fetch data from EIA
             raw_records = await eia_service.get_electricity_demand(
@@ -242,26 +426,83 @@ async def run_energy_ingestion(
             
             logger.info(f"📊 Fetched {len(raw_records)} raw records from EIA")
             
+            # Broadcast validation progress
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "validating",
+                "message": f"Validating {len(raw_records)} records",
+                "progress": 40
+            })
+            
             # Process and validate data
             validated_records, validation_report = data_processor.validate_energy_data(raw_records)
             cleaned_records = data_processor.detect_outliers(validated_records)
             
-            logger.info(f"🔍 Validation complete: {len(cleaned_records)} valid records")
+            # Broadcast save progress
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "saving",
+                "message": f"Saving {len(cleaned_records)} validated records",
+                "progress": 70
+            })
             
             # Save to database
             result = await EnergyRepository.create_energy_records(db, cleaned_records)
             
+            # Broadcast new energy data to subscribers
+            if result['created'] > 0:
+                await broadcast_energy_data({
+                    "event": "new_data_ingested",
+                    "records_created": result['created'],
+                    "regions": regions,
+                    "timestamp_range": {
+                        "start": start_date.isoformat(),
+                        "end": end_date.isoformat()
+                    },
+                    "validation_report": validation_report
+                })
+            
+            # Broadcast quality check progress
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "quality_check",
+                "message": "Running post-ingestion quality check",
+                "progress": 90
+            })
+            
             # Run quality check after data ingestion
             try:
-                logger.info("🔍 Running post-ingestion quality check...")
                 quality_results = await quality_service.run_comprehensive_quality_check(db)
-                logger.info(f"📊 Quality check completed: Overall score {quality_results.get('overall_score', 0)}%")
+                
+                # Broadcast quality update
+                await broadcast_quality_update({
+                    "event": "post_ingestion_check",
+                    "overall_score": quality_results.get('overall_score', 0),
+                    "pipeline": pipeline_name,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
             except Exception as quality_error:
                 logger.warning(f"⚠️ Quality check failed but ingestion succeeded: {str(quality_error)}")
-                # Don't fail the pipeline if quality check fails
+                
+                await broadcast_quality_update({
+                    "event": "quality_check_failed",
+                    "error": str(quality_error),
+                    "pipeline": pipeline_name
+                })
             
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
+            
+            # Broadcast completion
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "completed",
+                "message": f"Pipeline completed successfully in {duration:.2f}s",
+                "progress": 100,
+                "duration_seconds": duration,
+                "result": result
+            })
             
             logger.info(f"✅ Pipeline completed successfully in {duration:.2f}s: {result}")
             
@@ -283,6 +524,15 @@ async def run_energy_ingestion(
             }
             
         except Exception as e:
+            # Broadcast error
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "failed",
+                "message": f"Pipeline failed: {str(e)}",
+                "error": str(e),
+                "progress": 0
+            })
+            
             logger.error(f"❌ Pipeline failed: {str(e)}")
             return {
                 "status": "failed",
@@ -292,14 +542,14 @@ async def run_energy_ingestion(
             }
     
     # Run pipeline in background
-    background_tasks.add_task(run_pipeline)
+    background_tasks.add_task(run_pipeline_with_updates)
     
     return {
-        "message": "Energy ingestion pipeline started",
+        "message": "Energy ingestion pipeline started with real-time updates",
         "regions": regions,
         "days_back": days_back,
         "status": "running",
-        "note": "Check the /api/v1/energy/consumption endpoint in a few moments to see results"
+        "websocket_note": "Connect to /ws to receive real-time updates"
     }
 
 @app.post("/api/v1/pipeline/run-weather-ingestion")
@@ -308,7 +558,7 @@ async def run_weather_ingestion(
     cities: List[str] = Query(["Boston", "New York", "Los Angeles", "Chicago"], description="Cities to fetch weather for"),
     db: AsyncSession = Depends(get_db)
 ):
-    """Trigger weather data ingestion pipeline"""
+    """Trigger weather data ingestion pipeline with real-time WebSocket updates"""
     
     # Check if API key is configured
     if not settings.openweather_api_key or settings.openweather_api_key == "dummy_key":
@@ -317,30 +567,103 @@ async def run_weather_ingestion(
             detail="OpenWeather API key not configured. Please set OPENWEATHER_API_KEY in your .env file"
         )
     
-    async def run_pipeline():
+    async def run_weather_pipeline_with_updates():
         start_time = datetime.now()
+        pipeline_name = "weather_ingestion"
         
         try:
+            # Broadcast start
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "started",
+                "cities": cities,
+                "start_time": start_time.isoformat(),
+                "message": f"Starting weather ingestion for cities: {', '.join(cities)}"
+            })
+            
             logger.info(f"🌤️ Starting weather ingestion pipeline for cities: {cities}")
+            
+            # Broadcast progress
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "fetching",
+                "message": "Fetching current weather data",
+                "progress": 30
+            })
             
             # Fetch weather data
             weather_records = await weather_service.get_current_weather(cities)
             
             logger.info(f"📊 Fetched {len(weather_records)} weather records")
             
+            # Broadcast progress
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "saving",
+                "message": f"Saving {len(weather_records)} weather records",
+                "progress": 70
+            })
+            
             # Save to database
             result = await WeatherRepository.create_weather_records(db, weather_records)
             
+            # Broadcast new weather data
+            if result['created'] > 0:
+                await broadcast_weather_data({
+                    "event": "new_weather_data",
+                    "records_created": result['created'],
+                    "cities": cities,
+                    "data": [
+                        {
+                            "region": record.region,
+                            "temperature": float(record.temperature) if record.temperature else None,
+                            "humidity": float(record.humidity) if record.humidity else None,
+                            "timestamp": record.timestamp.isoformat()
+                        } for record in weather_records[:5]  # Send sample of recent records
+                    ]
+                })
+            
             # Run quality check after weather data ingestion
             try:
-                logger.info("🔍 Running post-weather-ingestion quality check...")
+                await broadcast_pipeline_status({
+                    "pipeline": pipeline_name,
+                    "status": "quality_check",
+                    "message": "Running post-weather-ingestion quality check",
+                    "progress": 90
+                })
+                
                 quality_results = await quality_service.run_comprehensive_quality_check(db)
+                
+                # Broadcast quality update
+                await broadcast_quality_update({
+                    "event": "post_weather_ingestion_check",
+                    "overall_score": quality_results.get('overall_score', 0),
+                    "pipeline": pipeline_name,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
                 logger.info(f"📊 Weather quality check completed: Overall score {quality_results.get('overall_score', 0)}%")
             except Exception as quality_error:
                 logger.warning(f"⚠️ Weather quality check failed but ingestion succeeded: {str(quality_error)}")
+                
+                await broadcast_quality_update({
+                    "event": "quality_check_failed",
+                    "error": str(quality_error),
+                    "pipeline": pipeline_name
+                })
             
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
+            
+            # Broadcast completion
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "completed",
+                "message": f"Weather pipeline completed in {duration:.2f}s",
+                "progress": 100,
+                "duration_seconds": duration,
+                "result": result
+            })
             
             logger.info(f"✅ Weather pipeline completed in {duration:.2f}s: {result}")
             
@@ -356,6 +679,14 @@ async def run_weather_ingestion(
             }
             
         except Exception as e:
+            await broadcast_pipeline_status({
+                "pipeline": pipeline_name,
+                "status": "failed",
+                "message": f"Weather pipeline failed: {str(e)}",
+                "error": str(e),
+                "progress": 0
+            })
+            
             logger.error(f"❌ Weather pipeline failed: {str(e)}")
             return {
                 "status": "failed",
@@ -364,13 +695,13 @@ async def run_weather_ingestion(
                 "end_time": datetime.now().isoformat()
             }
     
-    background_tasks.add_task(run_pipeline)
+    background_tasks.add_task(run_weather_pipeline_with_updates)
     
     return {
-        "message": "Weather ingestion pipeline started",
+        "message": "Weather ingestion pipeline started with real-time updates",
         "cities": cities,
         "status": "running",
-        "note": "Check the /api/v1/weather/current endpoint in a few moments to see results"
+        "websocket_note": "Connect to /ws/weather to receive weather-specific updates"
     }
 
 @app.get("/api/v1/status")
@@ -413,24 +744,46 @@ async def run_quality_check(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
-    """Trigger a comprehensive data quality check"""
+    """Trigger a comprehensive data quality check with real-time updates"""
     
-    async def run_quality_check_task():
+    async def run_quality_check_with_updates():
         try:
+            # Broadcast start
+            await broadcast_quality_update({
+                "event": "quality_check_started",
+                "message": "Starting comprehensive data quality check",
+                "timestamp": datetime.now().isoformat()
+            })
+            
             logger.info("🔍 Starting manual quality check...")
             results = await quality_service.run_comprehensive_quality_check(db)
+            
+            # Broadcast results
+            await broadcast_quality_update({
+                "event": "quality_check_completed",
+                "results": results,
+                "overall_score": results.get('overall_score', 0),
+                "timestamp": datetime.now().isoformat()
+            })
+            
             logger.info(f"✅ Quality check completed: Overall score {results.get('overall_score', 0)}%")
             return results
+            
         except Exception as e:
+            await broadcast_quality_update({
+                "event": "quality_check_failed",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            })
             logger.error(f"❌ Quality check failed: {str(e)}")
             raise
     
-    background_tasks.add_task(run_quality_check_task)
+    background_tasks.add_task(run_quality_check_with_updates)
     
     return {
-        "message": "Data quality check started",
+        "message": "Data quality check started with real-time updates",
         "status": "running",
-        "note": "Check the /api/v1/quality/dashboard endpoint in a few moments for updated results"
+        "websocket_note": "Connect to /ws/quality to receive quality-specific updates"
     }
 
 @app.get("/api/v1/quality/metrics")

@@ -1,16 +1,50 @@
 import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import StatusOverview from './components/StatusOverview';
-import PipelineMonitor from './components/PipelineMonitor';
+import RealTimePipelineMonitor from './components/RealTimePipelineMonitor';
 import DataQualityPanel from './components/DataQualityPanel';
-import EnergyVisualization from './components/EnergyVisualization';
+import RealTimeEnergyVisualization from './components/RealTimeEnergyVisualization';
 import ApiStatusPanel from './components/ApiStatusPanel';
 import ConfigurationPanel from './components/ConfigurationPanel';
+import WebSocketStatus from './components/WebSocketStatus';
+import { useGeneralWebSocket, WebSocketMessage } from './hooks/useWebSocket';
 
 function App() {
   const [activeTab, setActiveTab] = useState('overview');
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'checking'>('checking');
+  const [realtimeData, setRealtimeData] = useState<{
+    energyUpdates: number;
+    weatherUpdates: number;
+    qualityUpdates: number;
+    pipelineUpdates: number;
+  }>({
+    energyUpdates: 0,
+    weatherUpdates: 0,
+    qualityUpdates: 0,
+    pipelineUpdates: 0
+  });
+
+  // WebSocket connection for real-time updates
+  const { isConnected, lastMessage } = useGeneralWebSocket((message: WebSocketMessage) => {
+    // Handle different types of real-time messages
+    switch (message.type) {
+      case 'energy_data':
+        setRealtimeData(prev => ({ ...prev, energyUpdates: prev.energyUpdates + 1 }));
+        break;
+      case 'weather_data':
+        setRealtimeData(prev => ({ ...prev, weatherUpdates: prev.weatherUpdates + 1 }));
+        break;
+      case 'quality_update':
+        setRealtimeData(prev => ({ ...prev, qualityUpdates: prev.qualityUpdates + 1 }));
+        break;
+      case 'pipeline_status':
+        setRealtimeData(prev => ({ ...prev, pipelineUpdates: prev.pipelineUpdates + 1 }));
+        break;
+    }
+    
+    setLastUpdate(new Date());
+  });
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -28,6 +62,11 @@ function App() {
     const interval = setInterval(checkBackendConnection, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  // Update connection status based on WebSocket
+  useEffect(() => {
+    setConnectionStatus(isConnected ? 'connected' : 'disconnected');
+  }, [isConnected]);
 
   const checkBackendConnection = async () => {
     try {
@@ -88,19 +127,53 @@ function App() {
 
     switch (activeTab) {
       case 'overview':
-        return <StatusOverview lastUpdate={lastUpdate} />;
+        return (
+          <div className="space-y-6">
+            <WebSocketStatus className="mb-6" />
+            {/* Real-time Data Summary */}
+            {isConnected && Object.values(realtimeData).some(count => count > 0) && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <h3 className="text-sm font-medium text-blue-800 mb-2">📡 Real-time Updates Today</h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                  <div className="text-center">
+                    <div className="text-lg font-bold text-blue-900">{realtimeData.energyUpdates}</div>
+                    <div className="text-blue-700">Energy Updates</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-lg font-bold text-blue-900">{realtimeData.weatherUpdates}</div>
+                    <div className="text-blue-700">Weather Updates</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-lg font-bold text-blue-900">{realtimeData.qualityUpdates}</div>
+                    <div className="text-blue-700">Quality Updates</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-lg font-bold text-blue-900">{realtimeData.pipelineUpdates}</div>
+                    <div className="text-blue-700">Pipeline Updates</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <StatusOverview lastUpdate={lastUpdate} />
+          </div>
+        );
       case 'pipeline':
-        return <PipelineMonitor />;
+        return <RealTimePipelineMonitor />;
       case 'quality':
         return <DataQualityPanel />;
       case 'visualization':
-        return <EnergyVisualization />;
+        return <RealTimeEnergyVisualization />;
       case 'apis':
         return <ApiStatusPanel />;
       case 'config':
         return <ConfigurationPanel />;
       default:
-        return <StatusOverview lastUpdate={lastUpdate} />;
+        return (
+          <div className="space-y-6">
+            <WebSocketStatus className="mb-6" />
+            <StatusOverview lastUpdate={lastUpdate} />
+          </div>
+        );
     }
   };
 
@@ -112,7 +185,7 @@ function App() {
         connectionStatus={connectionStatus}
       />
       
-      {/* Connection Status Banner */}
+      {/* Real-time Connection Status Banner */}
       {connectionStatus === 'disconnected' && (
         <div className="bg-red-50 border-b border-red-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
@@ -120,7 +193,7 @@ function App() {
               <div className="flex items-center space-x-2">
                 <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
                 <span className="text-sm text-red-700">
-                  Backend disconnected - Some features may not work properly
+                  Backend disconnected - Real-time features unavailable
                 </span>
               </div>
               <button 
@@ -137,11 +210,18 @@ function App() {
       {connectionStatus === 'connected' && (
         <div className="bg-green-50 border-b border-green-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-sm text-green-700">
-                Connected to backend API
-              </span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span className="text-sm text-green-700">
+                  {isConnected ? '🔴 Live: Real-time updates active' : 'Connected to backend API'}
+                </span>
+              </div>
+              {lastMessage && (
+                <div className="text-xs text-green-600">
+                  Last update: {new Date(lastMessage.timestamp).toLocaleTimeString()}
+                </div>
+              )}
             </div>
           </div>
         </div>
